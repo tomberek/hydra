@@ -137,6 +137,7 @@ checkout_ref(){
 init_submodules(){
     # Add urls into .git/config file
     git submodule init
+    git submodule update
 
     # list submodule directories and their hashes
     git submodule status |
