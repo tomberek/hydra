@@ -57,6 +57,7 @@ struct MyArgs : MixEvalArgs, MixCommonArgs
     Path releaseExpr;
     bool flake = false;
     bool dryRun = false;
+    std::string flakeAttribute = "";
 
     MyArgs() : MixCommonArgs("hydra-eval-jobs")
     {
@@ -77,6 +78,13 @@ struct MyArgs : MixEvalArgs, MixCommonArgs
             .longName = "flake",
             .description = "build a flake",
             .handler = {&flake, true}
+        });
+
+        addFlag({
+            .longName = "flake-attribute",
+            .description = "Flake attribute to build. Defaults to 'hydraJobs' then 'checks'.",
+            .labels = {"hydraJobs"},
+            .handler = {&flakeAttribute}
         });
 
         expectArg("expr", &releaseExpr);
@@ -137,9 +145,20 @@ static void worker(
         auto vOutputs = vFlake->attrs->get(state.symbols.create("outputs"))->value;
         state.forceValue(*vOutputs, noPos);
 
-        auto aHydraJobs = vOutputs->attrs->get(state.symbols.create("hydraJobs"));
-        if (!aHydraJobs)
-            aHydraJobs = vOutputs->attrs->get(state.symbols.create("checks"));
+        Strings tryAttributes = {};
+        if (myArgs.flakeAttribute != "") {
+            tryAttributes.push_back(myArgs.flakeAttribute);
+        } else {
+            tryAttributes.push_back("hydraJobs");
+            tryAttributes.push_back("checks");
+        }
+
+        Attr * aHydraJobs = nullptr;
+        for (auto & a : tryAttributes) {
+            aHydraJobs = vOutputs->attrs->get(state.symbols.create(a));
+            if (aHydraJobs)
+                break;
+        }
         if (!aHydraJobs)
             throw Error("flake '%s' does not provide any Hydra jobs or checks", flakeRef);
 
