@@ -363,34 +363,40 @@ impl Step {
         self.drv_info.load_full()
     }
 
+    /// Iterative DFS over `rdeps`; chains can be thousands of steps deep, so
+    /// this must not recurse (see `Steps::compute_critical_paths`, which hit
+    /// the same constraint over the same graph).
     #[tracing::instrument(skip(self, builds, steps))]
     pub fn get_dependents(
         self: &Arc<Self>,
         builds: &mut HashSet<Arc<Build>>,
         steps: &mut HashSet<Arc<Self>>,
     ) {
-        if steps.contains(self) {
-            return;
-        }
-        steps.insert(self.clone());
-
-        let rdeps = {
-            let state = self.state.read();
-            for b in &state.builds {
-                let Some(b) = b.upgrade() else { continue };
-
-                if !b.get_finished_in_db() {
-                    builds.insert(b);
-                }
-            }
-            state.rdeps.clone()
-        };
-
-        for rdep in rdeps {
-            let Some(rdep) = rdep.step.upgrade() else {
+        let mut stack = vec![self.clone()];
+        while let Some(step) = stack.pop() {
+            if steps.contains(&step) {
                 continue;
+            }
+            steps.insert(step.clone());
+
+            let rdeps = {
+                let state = step.state.read();
+                for b in &state.builds {
+                    let Some(b) = b.upgrade() else { continue };
+
+                    if !b.get_finished_in_db() {
+                        builds.insert(b);
+                    }
+                }
+                state.rdeps.clone()
             };
-            rdep.get_dependents(builds, steps);
+
+            for rdep in rdeps {
+                let Some(rdep) = rdep.step.upgrade() else {
+                    continue;
+                };
+                stack.push(rdep);
+            }
         }
     }
 
@@ -937,6 +943,35 @@ mod tests {
         c.set_finished(true);
         steps.compute_critical_paths();
         assert_eq!(cp(&a), 2);
+    }
+
+    #[test]
+    fn get_dependents_walks_a_deep_rdeps_chain() {
+        // Build a chain `head -> s1 -> s2 -> ... -> tail` 200_000 steps
+        // deep, where each step's sole rdep is the next one. A recursive
+        // implementation overflows the stack well before this depth; the
+        // iterative one must visit every step.
+        //
+        // `Steps` only keeps `Weak` refs internally, so every `Arc<Step>`
+        // must be kept alive here or its rdeps chain would dangle.
+        const DEPTH: usize = 200_000;
+        let steps = Steps::new();
+        let mut chain = Vec::with_capacity(DEPTH);
+        let (s0, _) = steps.create(&drv("s0"), None, None);
+        chain.push(s0);
+        for i in 1..DEPTH {
+            let (step, _) = steps.create(
+                &drv(&format!("s{i}")),
+                None,
+                Some((chain.last().unwrap(), OutputNameChain::default())),
+            );
+            chain.push(step);
+        }
+
+        let mut builds = HashSet::new();
+        let mut visited = HashSet::new();
+        chain.last().unwrap().get_dependents(&mut builds, &mut visited);
+        assert_eq!(visited.len(), DEPTH);
     }
 
     #[test]
