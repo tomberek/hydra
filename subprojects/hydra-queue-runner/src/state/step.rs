@@ -984,7 +984,10 @@ mod tests {
 
         let mut builds = HashSet::new();
         let mut visited = HashSet::new();
-        chain.last().unwrap().get_dependents(&mut builds, &mut visited);
+        chain
+            .last()
+            .unwrap()
+            .get_dependents(&mut builds, &mut visited);
         assert_eq!(visited.len(), DEPTH);
     }
 

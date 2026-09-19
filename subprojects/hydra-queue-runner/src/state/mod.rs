@@ -1036,7 +1036,7 @@ impl State {
                         // step will run. Finish the owning builds as cached and
                         // wake dependents with the resolved outputs.
                         let output = self.get_build_output_cached(&resolved_path).await?;
-                        let now = i32::try_from(jiff::Timestamp::now().as_second())?;
+                        let now = jiff::Timestamp::now().as_second();
                         let mut direct = step_info.step.get_direct_builds();
                         direct.sort_by_key(|b| b.id);
                         crate::utils::with_serialization_retry("cached_resolved_step", || async {
