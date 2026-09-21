@@ -97,7 +97,12 @@ where
     R: AsyncRead + Debug + Send + Unpin,
     W: AsyncWrite + Debug + Send + Unpin,
 {
-    async fn handshake(&mut self) -> DaemonResult<()> {
+    /// `trust_level` must come from the store's own [`DaemonStore::trust_level`]
+    /// (see the caller): it decides which code path Nix's `ssh-ng://`
+    /// build-hook takes for a delegated build (see
+    /// `HydraDaemonHandler::trust_level`'s doc comment), so hardcoding it
+    /// here would silently override whatever the store handler reports.
+    async fn handshake(&mut self, trust_level: Option<harmonia_protocol::types::TrustLevel>) -> DaemonResult<()> {
         let magic: u64 = self.reader.read_number().await?;
         if magic != CLIENT_MAGIC {
             return Err(DaemonError::custom(format!("bad client magic: {magic:#x}")));
@@ -138,9 +143,7 @@ where
             self.writer.write_value(NIX_VERSION).await?;
         }
         if version.minor() >= 35 {
-            self.writer
-                .write_value(&Some(harmonia_protocol::types::TrustLevel::Trusted))
-                .await?;
+            self.writer.write_value(&trust_level).await?;
         }
         self.writer.flush().await?;
         Ok(())
@@ -426,7 +429,7 @@ pub(crate) struct DaemonServer<H> {
 
 impl<H> DaemonServer<H>
 where
-    H: HandshakeDaemonStore + Clone + Send + Sync + 'static,
+    H: HandshakeDaemonStore + DaemonStore + Clone + Send + Sync + 'static,
 {
     /// Create the socket at `socket_path`, replacing any stale one.
     pub(crate) fn bind(
@@ -486,7 +489,8 @@ where
                 let writer = NixWriter::builder().set_store_dir(&store_dir).build(writer);
                 let mut conn = DaemonConnection { reader, writer };
 
-                if let Err(e) = conn.handshake().await {
+                let trust_level = handler.trust_level();
+                if let Err(e) = conn.handshake(trust_level).await {
                     error!("handshake error: {e:?}");
                     return;
                 }

@@ -144,6 +144,7 @@ pub(crate) struct App {
     pub log_prefix: PathBuf,
 }
 
+
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum ConfigError {
     #[error("Failed to parse TOML from '{path}': {source}")]

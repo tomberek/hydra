@@ -203,6 +203,40 @@ impl HydraDaemonHandler {
         result
     }
 
+    /// Write a derivation whose content arrived inline over the daemon
+    /// protocol (Nix's trusted-client `BuildDerivation` fast path, used
+    /// unconditionally for content-addressed derivations) to the upstream
+    /// store, so it is present on disk before `run_build` files the
+    /// `Builds` row and the queue runner's normal, disk-backed ingestion
+    /// picks it up. Doing this first avoids a race where the queue
+    /// runner's own polling loop sees the new row before the drv exists
+    /// and aborts the build as garbage-collected.
+    async fn upload_inline_derivation(
+        &self,
+        drv_path: &StorePath,
+        drv: &BasicDerivation,
+    ) -> Result<(), ProtocolError> {
+        let mut guard = self
+            .upstream
+            .acquire()
+            .await
+            .map_err(|e| ProtocolError::custom(format!("upstream pool: {e}")))?;
+        let info = guard
+            .execute(|c| {
+                harmonia_protocol::daemon::write_derivation(c, &self.store_dir, drv, false)
+            })
+            .await
+            .map_err(|e| ProtocolError::custom(format!("write inline derivation: {e}")))?;
+        if &info.path != drv_path {
+            return Err(ProtocolError::custom(format!(
+                "inline derivation content-addresses to {}, not the path {} the client named",
+                self.store_dir.display(&info.path),
+                self.store_dir.display(drv_path),
+            )));
+        }
+        Ok(())
+    }
+
     /// Run `work` while streaming the logs of every build it announces.
     ///
     /// The daemon protocol delivers an operation's log messages before
@@ -417,8 +451,28 @@ impl HandshakeDaemonStore for HydraDaemonHandler {
 }
 
 impl DaemonStore for HydraDaemonHandler {
+    /// `NotTrusted`, not `Trusted`: this is what a connecting client sees
+    /// during the handshake (`remoteTrustsUs` in Nix's own terms), and it
+    /// decides which code path Nix's `ssh-ng://`/`ssh://` build-hook
+    /// (`build-remote.cc`) takes for a delegated build. A `Trusted` daemon
+    /// makes the hook send input-addressed derivations inline via
+    /// `BuildDerivation` (no `.drv` ever uploaded, no `Builds` row to hang
+    /// the build off, and no code path here that can serve such a
+    /// request). `NotTrusted` makes it upload the real `.drv` first and
+    /// call `build_paths` instead, so those builds get Hydra's normal
+    /// `Steps`/`Queues` graph: dedup, previous-failure caching, and
+    /// wake-on-completion across the whole build.
+    ///
+    /// Content-addressed derivations are unaffected either way -- Nix
+    /// always takes the inline `BuildDerivation` fast path for those,
+    /// trusted or not, since CA output paths are self-verifying by
+    /// content hash. `build_derivation` handles that path by writing the
+    /// inline content to the upstream store itself
+    /// (`upload_inline_derivation`) before filing the `Builds` row, so it
+    /// is on disk by the time the queue runner's normal, disk-backed
+    /// ingestion pipeline picks the row up.
     fn trust_level(&self) -> Option<TrustLevel> {
-        Some(TrustLevel::Trusted)
+        Some(TrustLevel::NotTrusted)
     }
 
     fn set_options<'a>(
@@ -440,7 +494,7 @@ impl DaemonStore for HydraDaemonHandler {
         let drv = drv.clone();
         self.with_live_logs(move |announce| async move {
             require_normal_mode(mode)?;
-            this.assert_drv_uploaded(&drv_path).await?;
+            this.upload_inline_derivation(&drv_path, &drv).await?;
             let drv_path_str = this.store_dir.display(&drv_path).to_string();
             let nix_name: String = drv.name.to_string();
             let system = std::str::from_utf8(&drv.platform)
